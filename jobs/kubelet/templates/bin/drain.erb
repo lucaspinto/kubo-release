@@ -18,27 +18,33 @@ main() {
   check_if_pidfile_exists
   check_if_pid_is_running
 
-  retry cordon_node
-  k8s_disks=$(get_k8s_disks)
-  echo "Mounted volumes: $k8s_disks"
-  if ! drain_node ; then
-    <% if_p("kubelet-drain-force-node") do |prop| %>
-      <% if prop %>
-        force_kill_pods
-      <% else %>
-        echo "Unsuccessful function drain_node"
-        exit 1
+  if master_is_running?; then
+    retry cordon_node
+    k8s_disks=$(get_k8s_disks)
+    echo "Mounted volumes: $k8s_disks"
+    if ! drain_node ; then
+      <% if_p("kubelet-drain-force-node") do |prop| %>
+        <% if prop %>
+          force_kill_pods
+        <% else %>
+          echo "Unsuccessful function drain_node"
+          exit 1
+        <% end %>
       <% end %>
-    <% end %>
-  fi
+    fi
 
-  if [[ -z "${k8s_disks}" ]]; then
-    echo "No attached PVs"
-  else
-    watch_disks "${k8s_disks}"
-  fi
-  retry delete_drained_node
-}
+    if [[ -z "${k8s_disks}" ]]; then
+      echo "No attached PVs"
+    else
+      watch_disks "${k8s_disks}"
+    fi
+    retry delete_drained_node
+
+    else
+      echo 'Master seems to be down'
+      echo 'Assuming this is a bosh delete-deployment, the drain will just stop there.'
+    fi
+  }
 
 cordon_node() {
   kubectl --kubeconfig /var/vcap/jobs/kubelet/config/kubeconfig-drain cordon -l "bosh.id=<%= spec.id %>"
@@ -178,6 +184,23 @@ check_if_pidfile_exists() {
 kill_node() {
   kill -9 "$(head -1 "$PIDFILE")"
   rm -f $PIDFILE
+}
+
+master_is_running?() {
+  local ATTEMPTS_REMAINING=1002
+  local cacert=/var/vcap/jobs/kubelet/config/ca.pem
+  local auth_header='Authorization: Bearer <%= p("drain-api-token")  %>'
+
+  while [[ "$ATTEMPTS_REMAINING" -ne 0 ]]; do
+    if curl -sS https://master.cfcr.internal:8443/healthz -H "$auth_header" --fail --cacert "$cacert" --connect-timeout 2 > /dev/null; then
+      return 0
+    else
+      ATTEMPTS_REMAINING=$(( ATTEMPTS_REMAINING - 1 ))
+      sleep 1
+    fi
+  done
+
+  return 1
 }
 
 main
